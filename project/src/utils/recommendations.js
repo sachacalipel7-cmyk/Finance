@@ -1,15 +1,13 @@
+import { sumMonthlyEquivalent } from './financial';
+
 export const generateRecommendations = (profile, accounts, income, expenses) => {
   if (!profile || !profile.risk_tolerance || !profile.investment_horizon) {
     return null;
   }
 
-  const totalBalance = accounts.reduce((sum, acc) => sum + parseFloat(acc.balance || 0), 0);
-  const monthlyIncome = income
-    .filter((i) => i.frequency === 'monthly')
-    .reduce((sum, i) => sum + parseFloat(i.amount || 0), 0);
-  const monthlyExpenses = expenses
-    .filter((e) => e.frequency === 'monthly')
-    .reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
+  const totalBalance = accounts.reduce((sum, acc) => sum + Number.parseFloat(acc.balance || 0), 0);
+  const monthlyIncome = sumMonthlyEquivalent(income);
+  const monthlyExpenses = sumMonthlyEquivalent(expenses);
   const monthlySavings = monthlyIncome - monthlyExpenses;
 
   const recommendations = {
@@ -90,9 +88,11 @@ export const generateRecommendations = (profile, accounts, income, expenses) => 
   }
 
   if (monthlySavings > 0) {
-    recommendations.advice.push(`Avec ${monthlySavings.toFixed(0)}€ d'épargne mensuelle, mettez en place des virements automatiques`);
+    recommendations.advice.push(
+      `Avec ${Math.round(monthlySavings)}€ d'épargne mensuelle, mettez en place des virements automatiques`
+    );
   } else {
-    recommendations.advice.push('Attention : vos dépenses dépassent vos revenus. Réduisez vos dépenses avant d\'investir');
+    recommendations.advice.push("Attention : vos dépenses dépassent vos revenus. Réduisez vos dépenses avant d'investir");
   }
 
   if (totalBalance < recommendations.emergency_fund) {

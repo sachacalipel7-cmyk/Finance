@@ -1,22 +1,25 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
+import { useNotifications } from '../../contexts/NotificationContext';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { formatCurrency, sumMonthlyEquivalent } from '../../utils/financial';
 
 const COLORS = ['#0073e6', '#00a551', '#4da6ff', '#1ab568', '#80c0ff', '#80d6ab'];
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { notify } = useNotifications();
   const [accounts, setAccounts] = useState([]);
   const [income, setIncome] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    fetchData();
-  }, [user]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
+    if (!user?.id) return;
+    setIsFetching(true);
+    setError(null);
     try {
       const [accountsRes, incomeRes, expensesRes] = await Promise.all([
         supabase.from('accounts').select('*').eq('user_id', user.id),
@@ -24,42 +27,57 @@ export default function Dashboard() {
         supabase.from('expenses').select('*').eq('user_id', user.id),
       ]);
 
+      if (accountsRes.error || incomeRes.error || expensesRes.error) {
+        throw accountsRes.error || incomeRes.error || expensesRes.error;
+      }
+
       setAccounts(accountsRes.data || []);
       setIncome(incomeRes.data || []);
       setExpenses(expensesRes.data || []);
     } catch (error) {
       console.error('Error fetching data:', error);
+      setError('Impossible de charger vos données financières.');
+      notify({
+        type: 'error',
+        title: 'Tableau de bord',
+        message: "Une erreur est survenue lors du chargement de vos données.",
+      });
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  };
+  }, [notify, user?.id]);
 
-  const totalBalance = accounts.reduce((sum, acc) => sum + parseFloat(acc.balance || 0), 0);
-  const monthlyIncome = income
-    .filter((i) => i.frequency === 'monthly')
-    .reduce((sum, i) => sum + parseFloat(i.amount || 0), 0);
-  const monthlyExpenses = expenses
-    .filter((e) => e.frequency === 'monthly')
-    .reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
+  useEffect(() => {
+    if (!user?.id) {
+      setAccounts([]);
+      setIncome([]);
+      setExpenses([]);
+      return;
+    }
+    fetchData();
+  }, [fetchData, user?.id]);
+
+  const totalBalance = accounts.reduce((sum, acc) => sum + Number.parseFloat(acc.balance || 0), 0);
+  const monthlyIncome = sumMonthlyEquivalent(income);
+  const monthlyExpenses = sumMonthlyEquivalent(expenses);
 
   const accountsData = accounts.map((acc) => ({
     name: acc.account_name,
-    value: parseFloat(acc.balance || 0),
+    value: Number.parseFloat(acc.balance || 0),
   }));
 
   const expensesData = expenses
-    .filter((e) => e.frequency === 'monthly')
     .reduce((acc, e) => {
       const existing = acc.find((item) => item.name === e.category);
       if (existing) {
-        existing.value += parseFloat(e.amount || 0);
+        existing.value += sumMonthlyEquivalent([e]);
       } else {
-        acc.push({ name: e.category, value: parseFloat(e.amount || 0) });
+        acc.push({ name: e.category, value: sumMonthlyEquivalent([e]) });
       }
       return acc;
     }, []);
 
-  if (loading) {
+  if (isFetching && accounts.length === 0 && income.length === 0 && expenses.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-gray-600">Chargement...</div>
@@ -74,6 +92,12 @@ export default function Dashboard() {
         <p className="text-gray-600 mt-1">Vue d'ensemble de vos finances</p>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <div className="flex items-center space-x-3">
@@ -82,7 +106,7 @@ export default function Dashboard() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Patrimoine total</p>
-              <p className="text-2xl font-bold text-gray-900">{totalBalance.toFixed(2)} €</p>
+              <p className="text-2xl font-bold text-gray-900">{formatCurrency(totalBalance)}</p>
             </div>
           </div>
         </div>
@@ -94,7 +118,7 @@ export default function Dashboard() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Revenus mensuels</p>
-              <p className="text-2xl font-bold text-success-700">{monthlyIncome.toFixed(2)} €</p>
+              <p className="text-2xl font-bold text-success-700">{formatCurrency(monthlyIncome)}</p>
             </div>
           </div>
         </div>
@@ -106,7 +130,7 @@ export default function Dashboard() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Dépenses mensuelles</p>
-              <p className="text-2xl font-bold text-red-700">{monthlyExpenses.toFixed(2)} €</p>
+              <p className="text-2xl font-bold text-red-700">{formatCurrency(monthlyExpenses)}</p>
             </div>
           </div>
         </div>
@@ -178,7 +202,7 @@ export default function Dashboard() {
           <div>
             <p className="text-sm text-gray-600">Capacité d'épargne</p>
             <p className={`text-3xl font-bold ${monthlyIncome - monthlyExpenses >= 0 ? 'text-success-700' : 'text-red-700'}`}>
-              {(monthlyIncome - monthlyExpenses).toFixed(2)} €
+              {formatCurrency(monthlyIncome - monthlyExpenses)}
             </p>
           </div>
           <div className="text-right">

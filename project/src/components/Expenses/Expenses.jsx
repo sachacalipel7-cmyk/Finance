@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNotifications } from '../../contexts/NotificationContext';
+import ConfirmDialog from '../Common/ConfirmDialog';
+import { formatCurrency, sumMonthlyEquivalent } from '../../utils/financial';
 
 const categories = [
   'Loyer',
@@ -23,9 +26,13 @@ const frequencies = [
 
 export default function Expenses() {
   const { user } = useAuth();
+  const { notify } = useNotifications();
   const [expenses, setExpenses] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [error, setError] = useState(null);
+  const [expenseToDelete, setExpenseToDelete] = useState(null);
   const [formData, setFormData] = useState({
     category: 'Loyer',
     description: '',
@@ -33,11 +40,20 @@ export default function Expenses() {
     frequency: 'monthly',
   });
 
-  useEffect(() => {
-    fetchExpenses();
-  }, [user]);
+  const canSubmit = useMemo(() => {
+    if (isSubmitting) return false;
+    const amount = Number.parseFloat(formData.amount);
+    return (
+      !Number.isNaN(amount) &&
+      amount >= 0 &&
+      formData.category.trim().length > 0
+    );
+  }, [formData.amount, formData.category, isSubmitting]);
 
-  const fetchExpenses = async () => {
+  const fetchExpenses = useCallback(async () => {
+    if (!user?.id) return;
+    setIsFetching(true);
+    setError(null);
     try {
       const { data, error } = await supabase
         .from('expenses')
@@ -49,14 +65,30 @@ export default function Expenses() {
       setExpenses(data || []);
     } catch (error) {
       console.error('Error fetching expenses:', error);
+      setError('Impossible de charger vos dépenses.');
+      notify({
+        type: 'error',
+        title: 'Chargement des dépenses',
+        message: 'Une erreur est survenue lors de la récupération de vos dépenses.',
+      });
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  };
+  }, [notify, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setExpenses([]);
+      return;
+    }
+    fetchExpenses();
+  }, [fetchExpenses, user?.id]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true);
+    if (!user?.id || !canSubmit) return;
+    setIsSubmitting(true);
+    setError(null);
 
     try {
       const { error } = await supabase.from('expenses').insert([
@@ -64,7 +96,7 @@ export default function Expenses() {
           user_id: user.id,
           category: formData.category,
           description: formData.description,
-          amount: parseFloat(formData.amount),
+          amount: Number.parseFloat(formData.amount),
           frequency: formData.frequency,
         },
       ]);
@@ -73,40 +105,49 @@ export default function Expenses() {
 
       setFormData({ category: 'Loyer', description: '', amount: '', frequency: 'monthly' });
       setShowForm(false);
-      fetchExpenses();
+      await fetchExpenses();
+      notify({
+        type: 'success',
+        title: 'Dépense ajoutée',
+        message: 'La dépense a été enregistrée.',
+      });
     } catch (error) {
       console.error('Error creating expense:', error);
-      alert('Erreur lors de l\'ajout de la dépense');
+      setError("Impossible d'enregistrer cette dépense. Veuillez réessayer.");
+      notify({
+        type: 'error',
+        title: 'Ajout de dépense',
+        message: "Une erreur est survenue lors de l'ajout de la dépense.",
+      });
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm('Voulez-vous vraiment supprimer cette dépense ?')) return;
-
+  const handleDelete = async () => {
+    if (!expenseToDelete) return;
     try {
-      const { error } = await supabase.from('expenses').delete().eq('id', id);
+      const { error } = await supabase.from('expenses').delete().eq('id', expenseToDelete.id);
 
       if (error) throw error;
-      fetchExpenses();
+      setExpenseToDelete(null);
+      await fetchExpenses();
+      notify({
+        type: 'success',
+        title: 'Dépense supprimée',
+        message: 'La dépense a été retirée.',
+      });
     } catch (error) {
       console.error('Error deleting expense:', error);
-      alert('Erreur lors de la suppression de la dépense');
+      notify({
+        type: 'error',
+        title: 'Suppression de dépense',
+        message: "Impossible de supprimer cette dépense pour le moment.",
+      });
     }
   };
 
-  const monthlyTotal = expenses
-    .filter((e) => e.frequency === 'monthly')
-    .reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
-
-  if (loading && expenses.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-gray-600">Chargement...</div>
-      </div>
-    );
-  }
+  const monthlyTotal = sumMonthlyEquivalent(expenses);
 
   return (
     <div className="space-y-6">
@@ -123,14 +164,20 @@ export default function Expenses() {
         </button>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
         <div className="flex items-center space-x-3">
           <div className="bg-red-100 p-3 rounded-lg">
-            <span className="text-2xl">��</span>
+            <span className="text-2xl">💳</span>
           </div>
           <div>
             <p className="text-sm text-gray-600">Dépenses mensuelles totales</p>
-            <p className="text-3xl font-bold text-red-700">{monthlyTotal.toFixed(2)} €</p>
+            <p className="text-3xl font-bold text-red-700">{formatCurrency(monthlyTotal)}</p>
           </div>
         </div>
       </div>
@@ -176,6 +223,7 @@ export default function Expenses() {
               <input
                 type="number"
                 step="0.01"
+                min="0"
                 value={formData.amount}
                 onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                 className="w-full px-4 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-red-500 focus:border-transparent"
@@ -203,10 +251,10 @@ export default function Expenses() {
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full bg-red-600 text-white py-2 rounded hover:bg-red-700 transition disabled:opacity-50"
+              disabled={!canSubmit}
+              className="w-full bg-red-600 text-white py-2 rounded hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Ajout...' : 'Ajouter la dépense'}
+              {isSubmitting ? 'Ajout...' : 'Ajouter la dépense'}
             </button>
           </form>
         </div>
@@ -229,15 +277,15 @@ export default function Expenses() {
                 <td className="px-6 py-4 text-sm font-medium text-gray-900">{expense.category}</td>
                 <td className="px-6 py-4 text-sm text-gray-600">{expense.description || '-'}</td>
                 <td className="px-6 py-4 text-sm font-medium text-red-700">
-                  {parseFloat(expense.amount).toFixed(2)} €
+                  {formatCurrency(expense.amount)}
                 </td>
                 <td className="px-6 py-4 text-sm text-gray-600">
                   {frequencies.find((f) => f.value === expense.frequency)?.label}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <button
-                    onClick={() => handleDelete(expense.id)}
-                    className="text-red-600 hover:text-red-700 text-sm"
+                    onClick={() => setExpenseToDelete(expense)}
+                    className="text-red-600 hover:text-red-700 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 rounded"
                   >
                     Supprimer
                   </button>
@@ -247,13 +295,26 @@ export default function Expenses() {
           </tbody>
         </table>
 
-        {expenses.length === 0 && !showForm && (
+        {isFetching && expenses.length === 0 && (
+          <div className="text-center py-12 text-gray-500">Chargement des dépenses…</div>
+        )}
+
+        {expenses.length === 0 && !showForm && !isFetching && (
           <div className="text-center py-12">
             <p className="text-gray-500">Aucune dépense ajoutée pour le moment</p>
             <p className="text-gray-400 text-sm mt-1">Cliquez sur "Ajouter une dépense" pour commencer</p>
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        isOpen={Boolean(expenseToDelete)}
+        title="Supprimer cette dépense ?"
+        description={`La dépense "${expenseToDelete?.description || expenseToDelete?.category || ''}" sera supprimée.`}
+        confirmLabel="Supprimer"
+        onCancel={() => setExpenseToDelete(null)}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
