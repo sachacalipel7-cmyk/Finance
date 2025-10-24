@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNotifications } from '../../contexts/NotificationContext';
+import ConfirmDialog from '../Common/ConfirmDialog';
+import { formatCurrency, sumMonthlyEquivalent } from '../../utils/financial';
 
 const frequencies = [
   { value: 'monthly', label: 'Mensuel' },
@@ -11,20 +14,33 @@ const frequencies = [
 
 export default function Income() {
   const { user } = useAuth();
+  const { notify } = useNotifications();
   const [incomes, setIncomes] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [error, setError] = useState(null);
+  const [incomeToDelete, setIncomeToDelete] = useState(null);
   const [formData, setFormData] = useState({
     source: '',
     amount: '',
     frequency: 'monthly',
   });
 
-  useEffect(() => {
-    fetchIncomes();
-  }, [user]);
+  const canSubmit = useMemo(() => {
+    if (isSubmitting) return false;
+    const amount = Number.parseFloat(formData.amount);
+    return (
+      formData.source.trim().length > 0 &&
+      !Number.isNaN(amount) &&
+      amount >= 0
+    );
+  }, [formData.amount, formData.source, isSubmitting]);
 
-  const fetchIncomes = async () => {
+  const fetchIncomes = useCallback(async () => {
+    if (!user?.id) return;
+    setIsFetching(true);
+    setError(null);
     try {
       const { data, error } = await supabase
         .from('income')
@@ -36,21 +52,37 @@ export default function Income() {
       setIncomes(data || []);
     } catch (error) {
       console.error('Error fetching incomes:', error);
+      setError("Impossible de charger vos revenus.");
+      notify({
+        type: 'error',
+        title: 'Chargement des revenus',
+        message: "Une erreur est survenue lors de la récupération de vos revenus.",
+      });
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  };
+  }, [notify, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setIncomes([]);
+      return;
+    }
+    fetchIncomes();
+  }, [fetchIncomes, user?.id]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true);
+    if (!user?.id || !canSubmit) return;
+    setIsSubmitting(true);
+    setError(null);
 
     try {
       const { error } = await supabase.from('income').insert([
         {
           user_id: user.id,
           source: formData.source,
-          amount: parseFloat(formData.amount),
+          amount: Number.parseFloat(formData.amount),
           frequency: formData.frequency,
         },
       ]);
@@ -59,40 +91,49 @@ export default function Income() {
 
       setFormData({ source: '', amount: '', frequency: 'monthly' });
       setShowForm(false);
-      fetchIncomes();
+      await fetchIncomes();
+      notify({
+        type: 'success',
+        title: 'Revenu ajouté',
+        message: 'Le revenu a été enregistré.',
+      });
     } catch (error) {
       console.error('Error creating income:', error);
-      alert('Erreur lors de l\'ajout du revenu');
+      setError("Impossible d'enregistrer ce revenu. Veuillez réessayer.");
+      notify({
+        type: 'error',
+        title: 'Ajout du revenu',
+        message: "Une erreur est survenue lors de l'ajout du revenu.",
+      });
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm('Voulez-vous vraiment supprimer ce revenu ?')) return;
-
+  const handleDelete = async () => {
+    if (!incomeToDelete) return;
     try {
-      const { error } = await supabase.from('income').delete().eq('id', id);
+      const { error } = await supabase.from('income').delete().eq('id', incomeToDelete.id);
 
       if (error) throw error;
-      fetchIncomes();
+      setIncomeToDelete(null);
+      await fetchIncomes();
+      notify({
+        type: 'success',
+        title: 'Revenu supprimé',
+        message: 'Le revenu a été retiré.',
+      });
     } catch (error) {
       console.error('Error deleting income:', error);
-      alert('Erreur lors de la suppression du revenu');
+      notify({
+        type: 'error',
+        title: 'Suppression du revenu',
+        message: "Impossible de supprimer ce revenu pour le moment.",
+      });
     }
   };
 
-  const monthlyTotal = incomes
-    .filter((i) => i.frequency === 'monthly')
-    .reduce((sum, i) => sum + parseFloat(i.amount || 0), 0);
-
-  if (loading && incomes.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-gray-600">Chargement...</div>
-      </div>
-    );
-  }
+  const monthlyTotal = sumMonthlyEquivalent(incomes);
 
   return (
     <div className="space-y-6">
@@ -109,6 +150,12 @@ export default function Income() {
         </button>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
         <div className="flex items-center space-x-3">
           <div className="bg-success-100 p-3 rounded-lg">
@@ -116,7 +163,7 @@ export default function Income() {
           </div>
           <div>
             <p className="text-sm text-gray-600">Revenus mensuels totaux</p>
-            <p className="text-3xl font-bold text-success-700">{monthlyTotal.toFixed(2)} €</p>
+            <p className="text-3xl font-bold text-success-700">{formatCurrency(monthlyTotal)}</p>
           </div>
         </div>
       </div>
@@ -146,6 +193,7 @@ export default function Income() {
               <input
                 type="number"
                 step="0.01"
+                min="0"
                 value={formData.amount}
                 onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                 className="w-full px-4 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-success-500 focus:border-transparent"
@@ -173,10 +221,10 @@ export default function Income() {
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full bg-success-600 text-white py-2 rounded hover:bg-success-700 transition disabled:opacity-50"
+              disabled={!canSubmit}
+              className="w-full bg-success-600 text-white py-2 rounded hover:bg-success-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Ajout...' : 'Ajouter le revenu'}
+              {isSubmitting ? 'Ajout...' : 'Ajouter le revenu'}
             </button>
           </form>
         </div>
@@ -197,15 +245,15 @@ export default function Income() {
               <tr key={income.id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 text-sm text-gray-900">{income.source}</td>
                 <td className="px-6 py-4 text-sm font-medium text-success-700">
-                  {parseFloat(income.amount).toFixed(2)} €
+                  {formatCurrency(income.amount)}
                 </td>
                 <td className="px-6 py-4 text-sm text-gray-600">
                   {frequencies.find((f) => f.value === income.frequency)?.label}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <button
-                    onClick={() => handleDelete(income.id)}
-                    className="text-red-600 hover:text-red-700 text-sm"
+                    onClick={() => setIncomeToDelete(income)}
+                    className="text-red-600 hover:text-red-700 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 rounded"
                   >
                     Supprimer
                   </button>
@@ -215,13 +263,26 @@ export default function Income() {
           </tbody>
         </table>
 
-        {incomes.length === 0 && !showForm && (
+        {isFetching && incomes.length === 0 && (
+          <div className="text-center py-12 text-gray-500">Chargement des revenus…</div>
+        )}
+
+        {incomes.length === 0 && !showForm && !isFetching && (
           <div className="text-center py-12">
             <p className="text-gray-500">Aucun revenu ajouté pour le moment</p>
             <p className="text-gray-400 text-sm mt-1">Cliquez sur "Ajouter un revenu" pour commencer</p>
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        isOpen={Boolean(incomeToDelete)}
+        title="Supprimer ce revenu ?"
+        description={`Le revenu "${incomeToDelete?.source ?? ''}" sera supprimé.`}
+        confirmLabel="Supprimer"
+        onCancel={() => setIncomeToDelete(null)}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

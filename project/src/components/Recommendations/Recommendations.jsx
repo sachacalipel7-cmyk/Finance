@@ -1,34 +1,55 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNotifications } from '../../contexts/NotificationContext';
 import { generateRecommendations } from '../../utils/recommendations';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
+import { formatCurrency, sumMonthlyEquivalent } from '../../utils/financial';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 const COLORS = ['#0073e6', '#00a551', '#4da6ff', '#1ab568', '#80c0ff', '#80d6ab'];
 
 export default function Recommendations() {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const { notify } = useNotifications();
   const [profile, setProfile] = useState(null);
   const [accounts, setAccounts] = useState([]);
   const [income, setIncome] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [recommendations, setRecommendations] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [savedRecommendations, setSavedRecommendations] = useState([]);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    fetchData();
-  }, [user]);
+  const fetchData = useCallback(async () => {
+    if (!user?.id) return;
+    setIsFetching(true);
+    setError(null);
 
-  const fetchData = async () => {
     try {
       const [profileRes, accountsRes, incomeRes, expensesRes, savedRecsRes] = await Promise.all([
         supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
         supabase.from('accounts').select('*').eq('user_id', user.id),
         supabase.from('income').select('*').eq('user_id', user.id),
         supabase.from('expenses').select('*').eq('user_id', user.id),
-        supabase.from('recommendations').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+        supabase
+          .from('recommendations')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false }),
       ]);
+
+      if (profileRes.error || accountsRes.error || incomeRes.error || expensesRes.error || savedRecsRes.error) {
+        throw (
+          profileRes.error ||
+          accountsRes.error ||
+          incomeRes.error ||
+          expensesRes.error ||
+          savedRecsRes.error
+        );
+      }
 
       setProfile(profileRes.data);
       setAccounts(accountsRes.data || []);
@@ -44,37 +65,90 @@ export default function Recommendations() {
           expensesRes.data || []
         );
         setRecommendations(recs);
+      } else {
+        setRecommendations(null);
       }
     } catch (error) {
       console.error('Error fetching data:', error);
+      setError('Impossible de charger vos recommandations.');
+      notify({
+        type: 'error',
+        title: 'Recommandations',
+        message: "Une erreur est survenue lors du chargement des données nécessaires.",
+      });
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  };
+  }, [notify, user?.id]);
 
-  const saveRecommendations = async () => {
-    if (!recommendations) return;
+  useEffect(() => {
+    if (!user?.id) {
+      setProfile(null);
+      setAccounts([]);
+      setIncome([]);
+      setExpenses([]);
+      setSavedRecommendations([]);
+      setRecommendations(null);
+      return;
+    }
+    fetchData();
+  }, [fetchData, user?.id]);
+
+  const totalBalance = useMemo(
+    () => accounts.reduce((sum, acc) => sum + Number.parseFloat(acc.balance || 0), 0),
+    [accounts]
+  );
+  const monthlyIncome = useMemo(() => sumMonthlyEquivalent(income), [income]);
+  const monthlyExpenses = useMemo(() => sumMonthlyEquivalent(expenses), [expenses]);
+  const monthlySavings = monthlyIncome - monthlyExpenses;
+
+  const allocationData = useMemo(() => {
+    if (!recommendations) return [];
+    return Object.entries(recommendations.allocation).map(([name, value]) => ({
+      name,
+      value,
+    }));
+  }, [recommendations]);
+
+  const handleSaveRecommendations = async () => {
+    if (!recommendations || !user?.id) return;
+    setIsSaving(true);
 
     try {
       const { error } = await supabase.from('recommendations').insert([
         {
           user_id: user.id,
           recommendation_text: recommendations.advice.join('\n'),
-          allocation_suggestion: recommendations.allocation,
+          allocation_suggestion: JSON.stringify({
+            allocation: recommendations.allocation,
+            emergency_fund: recommendations.emergency_fund,
+            monthly_savings: monthlySavings,
+            total_balance: totalBalance,
+          }),
         },
       ]);
 
       if (error) throw error;
 
-      alert('Recommandations sauvegardées avec succès !');
-      fetchData();
+      notify({
+        type: 'success',
+        title: 'Recommandations sauvegardées',
+        message: 'Vos recommandations ont été ajoutées à l’historique.',
+      });
+      await fetchData();
     } catch (error) {
       console.error('Error saving recommendations:', error);
-      alert('Erreur lors de la sauvegarde');
+      notify({
+        type: 'error',
+        title: 'Sauvegarde',
+        message: "Impossible d'enregistrer ces recommandations pour le moment.",
+      });
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  if (loading) {
+  if (isFetching && !recommendations && !profile) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-gray-600">Chargement...</div>
@@ -90,6 +164,12 @@ export default function Recommendations() {
           <p className="text-gray-600 mt-1">Recevez des recommandations adaptées à votre profil</p>
         </div>
 
+        {error && (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-8 text-center">
           <span className="text-5xl">📋</span>
           <h3 className="text-xl font-semibold text-yellow-900 mt-4">Profil incomplet</h3>
@@ -97,7 +177,7 @@ export default function Recommendations() {
             Complétez votre profil pour recevoir des recommandations d'investissement personnalisées.
           </p>
           <button
-            onClick={() => window.location.hash = '#profile'}
+            onClick={() => navigate('/profile')}
             className="mt-4 px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition"
           >
             Compléter mon profil
@@ -107,18 +187,9 @@ export default function Recommendations() {
     );
   }
 
-  const allocationData = Object.entries(recommendations.allocation).map(([name, value]) => ({
-    name,
-    value,
-  }));
-
-  const totalBalance = accounts.reduce((sum, acc) => sum + parseFloat(acc.balance || 0), 0);
-  const monthlyIncome = income
-    .filter((i) => i.frequency === 'monthly')
-    .reduce((sum, i) => sum + parseFloat(i.amount || 0), 0);
-  const monthlyExpenses = expenses
-    .filter((e) => e.frequency === 'monthly')
-    .reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
+  if (!recommendations) {
+    return null;
+  }
 
   return (
     <div className="space-y-6">
@@ -128,12 +199,19 @@ export default function Recommendations() {
           <p className="text-gray-600 mt-1">Recommandations basées sur votre profil</p>
         </div>
         <button
-          onClick={saveRecommendations}
-          className="px-6 py-3 bg-success-600 text-white rounded-lg hover:bg-success-700 transition"
+          onClick={handleSaveRecommendations}
+          disabled={isSaving}
+          className="px-6 py-3 bg-success-600 text-white rounded-lg hover:bg-success-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          💾 Sauvegarder
+          {isSaving ? 'Sauvegarde…' : '💾 Sauvegarder'}
         </button>
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
@@ -142,12 +220,12 @@ export default function Recommendations() {
         </div>
         <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
           <p className="text-sm text-gray-600">Épargne de sécurité recommandée</p>
-          <p className="text-lg font-semibold text-success-700">{recommendations.emergency_fund.toFixed(0)} €</p>
+          <p className="text-lg font-semibold text-success-700">{formatCurrency(recommendations.emergency_fund)}</p>
         </div>
         <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
           <p className="text-sm text-gray-600">Capacité d'épargne mensuelle</p>
-          <p className={`text-lg font-semibold ${monthlyIncome - monthlyExpenses >= 0 ? 'text-success-700' : 'text-red-700'}`}>
-            {(monthlyIncome - monthlyExpenses).toFixed(0)} €
+          <p className={`text-lg font-semibold ${monthlySavings >= 0 ? 'text-success-700' : 'text-red-700'}`}>
+            {formatCurrency(monthlySavings)}
           </p>
         </div>
       </div>
@@ -176,16 +254,16 @@ export default function Recommendations() {
           </ResponsiveContainer>
 
           <div className="space-y-3">
-            {Object.entries(recommendations.allocation).map(([name, percentage], index) => (
-              <div key={name} className="flex items-center justify-between p-3 bg-gray-50 rounded">
+            {allocationData.map((entry, index) => (
+              <div key={entry.name} className="flex items-center justify-between p-3 bg-gray-50 rounded">
                 <div className="flex items-center space-x-3">
                   <div
                     className="w-4 h-4 rounded"
                     style={{ backgroundColor: COLORS[index % COLORS.length] }}
                   />
-                  <span className="font-medium text-gray-900">{name}</span>
+                  <span className="font-medium text-gray-900">{entry.name}</span>
                 </div>
-                <span className="text-lg font-semibold text-gray-900">{percentage}%</span>
+                <span className="text-lg font-semibold text-gray-900">{entry.value}%</span>
               </div>
             ))}
           </div>
@@ -207,9 +285,9 @@ export default function Recommendations() {
                 <div className="text-right">
                   <p className="text-xs text-gray-500">Niveau de risque</p>
                   <p className={`text-sm font-semibold ${
-                    investment.risk.includes('faible') ? 'text-success-600' :
-                    investment.risk.includes('Modéré') ? 'text-yellow-600' :
-                    'text-red-600'
+                    investment.risk.includes('faible') ? 'text-success-600'
+                    : investment.risk.includes('Modéré') ? 'text-yellow-600'
+                    : 'text-red-600'
                   }`}>
                     {investment.risk}
                   </p>
