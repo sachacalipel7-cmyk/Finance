@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNotifications } from '../../contexts/NotificationContext';
+import ConfirmDialog from '../Common/ConfirmDialog';
+import { formatCurrency } from '../../utils/financial';
 
 const accountTypes = [
   { value: 'current', label: 'Compte courant', icon: '🏦' },
@@ -13,20 +16,33 @@ const accountTypes = [
 
 export default function Accounts() {
   const { user } = useAuth();
+  const { notify } = useNotifications();
   const [accounts, setAccounts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [error, setError] = useState(null);
+  const [accountToDelete, setAccountToDelete] = useState(null);
   const [formData, setFormData] = useState({
     account_type: 'current',
     account_name: '',
     balance: '',
   });
 
-  useEffect(() => {
-    fetchAccounts();
-  }, [user]);
+  const canSubmit = useMemo(() => {
+    if (isSubmitting) return false;
+    const balance = Number.parseFloat(formData.balance);
+    return (
+      formData.account_name.trim().length > 0 &&
+      !Number.isNaN(balance) &&
+      balance >= 0
+    );
+  }, [formData.account_name, formData.balance, isSubmitting]);
 
-  const fetchAccounts = async () => {
+  const fetchAccounts = useCallback(async () => {
+    if (!user?.id) return;
+    setIsFetching(true);
+    setError(null);
     try {
       const { data, error } = await supabase
         .from('accounts')
@@ -38,14 +54,30 @@ export default function Accounts() {
       setAccounts(data || []);
     } catch (error) {
       console.error('Error fetching accounts:', error);
+      setError("Impossible de charger vos comptes pour le moment.");
+      notify({
+        type: 'error',
+        title: 'Chargement des comptes',
+        message: "Une erreur est survenue lors de la récupération de vos comptes.",
+      });
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  };
+  }, [notify, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setAccounts([]);
+      return;
+    }
+    fetchAccounts();
+  }, [fetchAccounts, user?.id]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true);
+    if (!user?.id) return;
+    setIsSubmitting(true);
+    setError(null);
 
     try {
       const { error } = await supabase.from('accounts').insert([
@@ -53,7 +85,7 @@ export default function Accounts() {
           user_id: user.id,
           account_type: formData.account_type,
           account_name: formData.account_name,
-          balance: parseFloat(formData.balance),
+          balance: Number.parseFloat(formData.balance),
         },
       ]);
 
@@ -61,26 +93,45 @@ export default function Accounts() {
 
       setFormData({ account_type: 'current', account_name: '', balance: '' });
       setShowForm(false);
-      fetchAccounts();
+      await fetchAccounts();
+      notify({
+        type: 'success',
+        title: 'Compte ajouté',
+        message: 'Votre compte a été enregistré avec succès.',
+      });
     } catch (error) {
       console.error('Error creating account:', error);
-      alert('Erreur lors de la création du compte');
+      setError("Impossible d'enregistrer ce compte. Veuillez réessayer.");
+      notify({
+        type: 'error',
+        title: 'Création du compte',
+        message: "Une erreur est survenue lors de la création du compte.",
+      });
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm('Voulez-vous vraiment supprimer ce compte ?')) return;
-
+  const handleDelete = async () => {
+    if (!accountToDelete) return;
     try {
-      const { error } = await supabase.from('accounts').delete().eq('id', id);
+      const { error } = await supabase.from('accounts').delete().eq('id', accountToDelete.id);
 
       if (error) throw error;
-      fetchAccounts();
+      setAccountToDelete(null);
+      await fetchAccounts();
+      notify({
+        type: 'success',
+        title: 'Compte supprimé',
+        message: 'Le compte a été supprimé de votre liste.',
+      });
     } catch (error) {
       console.error('Error deleting account:', error);
-      alert('Erreur lors de la suppression du compte');
+      notify({
+        type: 'error',
+        title: 'Suppression du compte',
+        message: "Impossible de supprimer ce compte pour le moment.",
+      });
     }
   };
 
@@ -88,15 +139,7 @@ export default function Accounts() {
     return accountTypes.find((t) => t.value === type)?.icon || '📊';
   };
 
-  const totalBalance = accounts.reduce((sum, acc) => sum + parseFloat(acc.balance || 0), 0);
-
-  if (loading && accounts.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-gray-600">Chargement...</div>
-      </div>
-    );
-  }
+  const totalBalance = accounts.reduce((sum, acc) => sum + Number.parseFloat(acc.balance || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -113,6 +156,12 @@ export default function Accounts() {
         </button>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
         <div className="flex items-center space-x-3">
           <div className="bg-primary-100 p-3 rounded-lg">
@@ -120,7 +169,7 @@ export default function Accounts() {
           </div>
           <div>
             <p className="text-sm text-gray-600">Patrimoine total</p>
-            <p className="text-3xl font-bold text-gray-900">{totalBalance.toFixed(2)} €</p>
+            <p className="text-3xl font-bold text-gray-900">{formatCurrency(totalBalance)}</p>
           </div>
         </div>
       </div>
@@ -177,10 +226,10 @@ export default function Accounts() {
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full bg-primary-600 text-white py-2 rounded hover:bg-primary-700 transition disabled:opacity-50"
+              disabled={!canSubmit}
+              className="w-full bg-primary-600 text-white py-2 rounded hover:bg-primary-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Ajout...' : 'Ajouter le compte'}
+              {isSubmitting ? 'Ajout...' : 'Ajouter le compte'}
             </button>
           </form>
         </div>
@@ -202,26 +251,39 @@ export default function Accounts() {
                 </div>
               </div>
               <button
-                onClick={() => handleDelete(account.id)}
-                className="text-red-600 hover:text-red-700 text-sm"
+                onClick={() => setAccountToDelete(account)}
+                className="text-red-600 hover:text-red-700 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 rounded"
               >
                 ✕
               </button>
             </div>
             <div>
               <p className="text-sm text-gray-600">Solde</p>
-              <p className="text-2xl font-bold text-gray-900">{parseFloat(account.balance).toFixed(2)} €</p>
+              <p className="text-2xl font-bold text-gray-900">{formatCurrency(account.balance)}</p>
             </div>
           </div>
         ))}
       </div>
 
-      {accounts.length === 0 && !showForm && (
+      {isFetching && accounts.length === 0 && (
+        <div className="flex items-center justify-center py-12 text-gray-500">Chargement des comptes…</div>
+      )}
+
+      {accounts.length === 0 && !showForm && !isFetching && (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
           <p className="text-gray-500">Aucun compte ajouté pour le moment</p>
           <p className="text-gray-400 text-sm mt-1">Cliquez sur "Ajouter un compte" pour commencer</p>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(accountToDelete)}
+        title="Supprimer ce compte ?"
+        description={`La suppression de "${accountToDelete?.account_name ?? ''}" est définitive.`}
+        confirmLabel="Supprimer"
+        onCancel={() => setAccountToDelete(null)}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
